@@ -1,0 +1,633 @@
+---
+title: "Statistical Learning Project. Part C"
+author: "Sofía Díez Martínez (100561906), Lorena Torres Jiménez (100475834)"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: true      
+    toc_depth: 2  
+    toc_float: true 
+editor_options: 
+  markdown: 
+    wrap: sentence
+---
+
+```{r}
+# Clean the environment
+rm(list = ls()) 
+
+# Libraries we will use
+library(OpenImageR) # to read images
+library(plotly) # to plot
+```
+
+# Assignment Part C
+
+The main objective of this project is based on the exploration of the application of Statistical Learning techniques for image processing and segmentation, concretely focusing on the identification of patterns within a complex visual dataset.
+Hence, it is desired to transform high-dimensional colour information into meaningful projections that reveal hidden structures not immediately apparent in the original RGB space.
+
+Consequently, a structured pipeline was designed for achieving the proposed goal, so that there is a first data preprocessing stage, which will be followed by dimensionality reduction and projection pursuit.
+Lastly, clustering and segmentation will be performed for effectively visualizing the images in the dataset.
+Therefore, through this process, it is demonstrated how linear transformations and optimization on a spherical coordinate system can be implemented for extracting meaningful information from multidimensional data.
+
+In order to obtain the projection, the following steps were performed:
+
+1\.
+Load the image
+
+2\.
+Put the image in a suitable format (a table)
+
+3\.
+Whiten the data with package whitening, since in a whitened space, maximizing non-Gausianity is equivalent to searching for directions on the unit sphere
+
+4\.
+Check that the output has mean = 0, var = 1 and uncorrelated
+
+5\.
+In order to find the first projection that maximizes the bimodality;
+
+-   Check that all the points are in the sphere
+
+-   Perform the k-means with 2 centroids
+
+-   Compute the Fisher index in the output of the k-means
+
+The analysis begins by loading the image, and representing it in the RGB color space, where each pixel is described by three intensity values corresponding to the red, green, and blue channels.
+Hence, we will first perform the preprocessing steps.
+
+```{r}
+# 1. Load the image
+name <- "melanoma.jpg"
+Image <- readImage(name)
+
+
+
+# 2. Put the image in a suitable format
+red <- as.vector(Image[,,1])
+green <- as.vector(Image[,,2])
+blue <- as.vector(Image[,,3])
+
+X <- cbind(red, green, blue)
+
+
+
+# 3. Whiten the data
+# Center the data
+X_centered <- scale(X, center=TRUE, scale=FALSE) 
+
+covX <- cov(X_centered)
+eig <- eigen(covX)
+D_inv_sqrt <- diag(1 / sqrt(eig$values))
+
+W <- eig$vectors %*% D_inv_sqrt
+Z <- X_centered %*% W # whitened matrix
+
+
+
+# 4. Check the output has mean = 0, var = 1 and uncorrelated
+apply(Z,2,mean) # ~ 0
+
+cov(Z)
+
+cor(Z[,1],Z[,2]) # uncorrelated
+cor(Z[,1],Z[,3]) # uncorrelated
+cor(Z[,2],Z[,3]) # uncorrelated
+```
+
+To identify projections that reveal meaningful structure in the data, a criterion based on class separability is required.
+For this purpose, the Fisher index is used as a measure of bimodality.
+Given a one-dimensional projection, k-means clustering with two clusters is applied, and the Fisher index is computed as the squared distance between cluster means normalized by the sum of within-cluster variances.
+
+This criterion favors projections in which the data naturally separate into two distinct groups, making it particularly suitable for segmentation tasks.
+
+```{r}
+
+# 5. Find the first projection that maximizes the bimodality
+
+# Function that computes the Fisher index
+calc_fisher <- function(vec) {
+  # Input:
+  #   - vec: vector you want to calculate the projections
+  #
+  # Output:
+  #   - Fisher index in the output of the k-means
+  
+  # KMeans 
+  km <- kmeans(vec, centers = 2,  iter.max = 20, nstart = 10)
+  v1 <- unique(km$cluster)[1]
+  v2 <- unique(km$cluster)[2]
+  
+  # Compute the variances
+  S1 <- var(vec[km$cluster==v1])
+  S2 <- var(vec[km$cluster==v2])
+  
+  return((km$centers[1] - km$centers[2])^2 / (S1 + S2))
+}
+
+```
+
+## First projection
+
+The search for the optimal projection is performed by parameterizing the unit sphere using spherical coordinates.
+For each candidate direction on the sphere, the data are projected, clustered using k-means, and evaluated using the Fisher index.
+
+By exhaustively evaluating directions across the sphere, an optimization surface is obtained, which maps each direction to its corresponding Fisher index value.
+The direction that maximizes this index is selected as the first projection, as it yields the strongest bimodal structure in the data.
+
+```{r}
+
+# Obtain the projection that maximizes the fisher index and the projected image
+thetas <- seq(0, 2*pi, length.out = 50)
+phis <- seq(0, pi, length.out = 50)
+
+best_score <- 0
+z_surface <- matrix(0, nrow = length(thetas), ncol = length(phis))
+
+for(i in 1:length(thetas)) {
+  for(j in 1:length(phis)) {
+    theta = thetas[i]
+    phi = phis[j]
+    w <- c(sin(phi)*cos(theta), sin(phi)*sin(theta), cos(phi))
+    z_surface[i, j] <- calc_fisher(Z %*% w)
+    if(z_surface[i, j] > best_score) {
+      best_score <- z_surface[i, j]
+      w1 <- w
+    }
+  }
+}
+
+
+# Optimization Surface using Plotly
+p <- plot_ly(x = ~phis, y = ~thetas, z = ~z_surface) %>% 
+  add_surface() %>%
+  layout(
+    title = "Optimization Surface using the Fisher Index",
+    scene = list(
+      xaxis = list(title = "Phi "),
+      yaxis = list(title = "Theta"),
+      zaxis = list(title = "Fisher Index")
+    )
+  )
+
+p
+```
+
+The resulting optimization surface reveals that only a small subset of directions in the whitened space yield high Fisher index values.
+This indicates that meaningful segmentation is concentrated in a low-dimensional linear subspace rather than being uniformly distributed across all possible directions.
+
+The presence of clear maximum suggests that the image contains statistically significant structures that can be isolated through appropriate linear projections.
+
+Once the optimal projection has been identified, the image is projected onto this direction and reshaped back into its original spatial dimensions.
+The resulting projected image highlights regions with distinct statistical behavior.
+
+```{r}
+#Projected image with w1
+
+proj1 <- as.vector(Z %*% w1)
+proj1_img <- matrix(
+  proj1,
+  nrow = dim(Image)[1],
+  ncol = dim(Image)[2]
+)
+
+image(proj1_img, col = gray.colors(256),
+      main = "Projection 1 (maximum Fisher index)")
+```
+
+```{r}
+#Histogram of the projection
+
+hist(proj1, breaks = 100,
+     main = "Histogram of Projection 1",
+     xlab = "Projected values")
+```
+
+```{r}
+#K-means segmentation
+
+km1 <- kmeans(proj1, centers = 2, nstart = 10)
+
+seg1 <- matrix(km1$cluster,nrow = dim(Image)[1],ncol = dim(Image)[2])
+image(seg1, col = c("black", "white"), main = "Segmentation using Projection 1")
+```
+
+The histogram of the projected values exhibits clear bimodality, confirming the suitability of the selected projection.
+Finally, k-means clustering is applied to the projected data to obtain a binary segmentation.
+Although spatial constraints are not explicitly enforced, the resulting segmentation is coherent due to the strong separation induced by the projection.
+
+## Second projection
+
+After identifying the first projection that maximizes the Fisher index, the next step consists of extracting additional independent information from the image.
+In the context of ICA and projection pursuit, this is achieved by searching for a new projection that is orthogonal to the previously found direction.
+
+Orthogonality ensures that the new projection captures variability that is not already explained by the first component, thus corresponding to a different linear subspace of the whitened space.
+
+Since the data have been whitened, the constraint of orthogonality is equivalent to restricting the search to the unit sphere and enforcing that the new projection lies in the plane perpendicular to the first projection vector.
+Instead of exploring the full spherical surface again, it is sufficient to analyze projections along this circle and select the direction that maximizes the Fisher index.
+
+To restrict the optimization to directions orthogonal to the first projection $w_1$​, an orthonormal basis of the plane perpendicular to $w_1$​ is constructed.
+First, a vector that is not collinear with $w_1$​ is selected.
+
+Then, the Gram–Schmidt process is applied to obtain a unit vector $u_1$​ orthogonal to $w_1$​.
+A second orthogonal direction $u_2$​ is computed as the cross product between $w_1$​ and $u_1$​, ensuring that $\{u_1,u_2\}$ forms an orthonormal basis of the orthogonal plane.
+
+```{r}
+#We need to construct an orthonormal base of the plane perpendicular to w1, as we are looking for the max Fisher constrained to the orthogonal plane to w1 (which is a circle)
+
+
+# a vector non-collinear with w1
+v <- c(1, 0, 0)
+if (abs(sum(v * w1)) > 0.9) {
+  v <- c(0, 1, 0)
+}
+
+#Gram-Schmidt
+u1 <- v - sum(v * w1) * w1
+u1 <- u1 / sqrt(sum(u1^2))
+
+u2 <- c(
+  w1[2]*u1[3] - w1[3]*u1[2],
+  w1[3]*u1[1] - w1[1]*u1[3],
+  w1[1]*u1[2] - w1[2]*u1[1]
+)
+```
+
+```{r}
+#We are now looking for the orthogonal circle
+
+angles <- seq(0,2*pi,length.out = 200)
+best_score2 <- -Inf
+for (a in angles) {
+  w <- cos(a)*u1 + sin(a)*u2
+  score <- calc_fisher(Z %*% w)
+  
+  if (score > best_score2) {
+    best_score2 <- score
+    w2 <- w
+  }
+}
+```
+
+Using the circular parametrization described above, the Fisher index is evaluated for each candidate projection along the circle.
+The direction that maximizes the Fisher index is selected as the second projection $w_2$​.
+This step corresponds to identifying the most bimodal direction within the subspace orthogonal to the first component, thus revealing a complementary structure in the data.
+
+We will now visualize the second projected image, its histogram, and indicate how we would segment it with the k-means.
+
+```{r}
+# Evaluate Fisher index along the orthogonal circle
+fisher_vals <- numeric(length(angles))
+cos_vals <- numeric(length(angles))
+sin_vals <- numeric(length(angles))
+
+for (i in seq_along(angles)) {
+  a <- angles[i]
+  w <- cos(a) * u1 + sin(a) * u2
+  
+  cos_vals[i] <- cos(a)
+  sin_vals[i] <- sin(a)
+  fisher_vals[i] <- calc_fisher(Z %*% w)
+}
+
+# 3D plot of the optimization curve
+
+p_circle <- plot_ly(
+  x = ~cos_vals,
+  y = ~sin_vals,
+  z = ~fisher_vals,
+  type = "scatter3d",
+  mode = "lines+markers",
+  marker = list(size = 4),
+  line = list(width = 3)
+) %>%
+  layout(
+    title = "Fisher Index on the Orthogonal Projection Circle",
+    scene = list(
+      xaxis = list(title = "cos(alpha)"),
+      yaxis = list(title = "sin(alpha)"),
+      zaxis = list(title = "Fisher Index")
+    )
+  )
+
+p_circle
+
+```
+
+The figure shows the Fisher index evaluated along the unit circle defining the subspace orthogonal to the first projection, revealing a clear maximum that identifies the second most informative projection direction.
+
+Once the optimal orthogonal projection has been identified, the image is projected onto this direction.
+This representation often emphasizes structures that were not visible in the first projection, confirming that the second component captures different information from the data.
+
+```{r}
+# Projected image with w2
+
+proj2 <- as.vector(Z%*% w2)
+proj2_img <- matrix(proj2, nrow=dim(Image)[1], ncol = dim(Image)[2])
+image(proj2_img, col = gray.colors(256), main = "Projection 2 (orthogonal to projection 1)")
+
+```
+
+```{r}
+#Histogram of the projection
+
+hist(proj2, breaks = 100,
+     main = "Histogram of Projection 2",
+     xlab = "Projected values")
+```
+
+```{r}
+#Segmentation using k-means & projection 2
+
+km2 <- kmeans(proj2, centers = 2, nstart = 10)
+seg2 <- matrix(km2$cluster, nrow = dim(Image)[1], ncol = dim(Image)[2])
+image(seg2, col = c("black", "white"), main = "Segmentation using Projection 2")
+```
+
+This second projection demonstrates how meaningful and complementary information can be extracted by sequentially exploring orthogonal subspaces of the whitened data.
+Together, the two projections form a low-dimensional representation that captures distinct non-Gaussian structures in the original RGB image, closely aligning with the principles underlying Independent Component Analysis.
+
+## Third projection
+
+After extracting the first two projections that maximize the Fisher index under orthogonality constraints, the final step consists of identifying a third projection that is orthogonal to both previously obtained directions.
+Since the data lie in a three-dimensional whitened space, this third direction completes an orthonormal basis of the space.
+
+At this point, no further optimization is required.
+The third projection is uniquely determined (up to sign) as the vector orthogonal to both $w_1$​ and $w_2$​.
+Together, the three projections define a full change of basis from the original whitened RGB coordinates to a new coordinate system aligned with the intrinsic statistical structure of the data.
+
+By projecting the image onto this final direction and performing segmentation, we can observe how the remaining variance reveals additional internal structures within the image.
+
+```{r}
+#Third projection (orthogonal to w1 & w2)
+
+w3 <- c(
+  w1[2]*w2[3] - w1[3]*w2[2],
+  w1[3]*w2[1] - w1[1]*w2[3],
+  w1[1]*w2[2] - w1[2]*w2[1]
+)
+
+w3 <- w3 / sqrt(sum(w3^2))
+```
+
+As in the previous cases, k-means clustering with two clusters is applied to the projected values in order to obtain a binary segmentation.
+Although this projection is not optimized for bimodality, the resulting segmentation can still reveal subtle patterns and contrasts present in the image.
+
+This confirms that the data contain internal structures distributed across multiple orthogonal directions, which become observable only after an appropriate change of basis.
+
+```{r}
+# Projected image with w3
+
+proj3 <- as.vector(Z %*% w3)
+proj3_img <- matrix(proj3, nrow= dim(Image)[1], ncol = dim(Image)[2])
+image(proj3_img, col = gray.colors(256), main = "Projection 3 (Orthogonal to the first two)")
+```
+
+```{r}
+km3 <- kmeans(proj3, centers = 2, nstart = 10)
+
+seg3 <- matrix(km3$cluster,nrow = dim(Image)[1],ncol = dim(Image)[2]
+)
+
+image(seg3, col = c("black", "white"), main = "Segmentation using Projection 3")
+
+```
+
+This final projection demonstrates that, after an appropriate change of basis, complex image data can be decomposed into a small number of orthogonal components, each revealing complementary internal structures that are not evident in the original RGB representation.
+
+# Checking with another image
+
+We have also performed this analysis with another image, where we can see the message "Super 3-D decoder glasses at super prices!" is revealed.
+
+```{r}
+# 1. Load the image
+name <- "daltonism.jpg"
+Image <- readImage(name)
+
+
+
+# 2. Put the image in a suitable format
+red <- as.vector(Image[,,1])
+green <- as.vector(Image[,,2])
+blue <- as.vector(Image[,,3])
+
+X <- cbind(red, green, blue)
+
+
+
+# 3. Whiten the data
+# Center the data
+X_centered <- scale(X, center=TRUE, scale=FALSE) 
+
+covX <- cov(X_centered)
+eig <- eigen(covX)
+D_inv_sqrt <- diag(1 / sqrt(eig$values))
+
+W <- eig$vectors %*% D_inv_sqrt
+Z <- X_centered %*% W # whitened matrix
+
+
+
+# 4. Check the output has mean = 0, var = 1 and uncorrelated
+apply(Z,2,mean) # ~ 0
+
+cov(Z)
+
+cor(Z[,1],Z[,2]) # uncorrelated
+cor(Z[,1],Z[,3]) # uncorrelated
+cor(Z[,2],Z[,3]) # uncorrelated
+
+
+#### FIRST PROJECTION
+
+# Obtain the projection that maximizes the fisher index and the projected image
+thetas <- seq(0, 2*pi, length.out = 50)
+phis <- seq(0, pi, length.out = 50)
+
+best_score <- 0
+z_surface <- matrix(0, nrow = length(thetas), ncol = length(phis))
+
+for(i in 1:length(thetas)) {
+  for(j in 1:length(phis)) {
+    theta = thetas[i]
+    phi = phis[j]
+    w <- c(sin(phi)*cos(theta), sin(phi)*sin(theta), cos(phi))
+    z_surface[i, j] <- calc_fisher(Z %*% w)
+    if(z_surface[i, j] > best_score) {
+      best_score <- z_surface[i, j]
+      w1 <- w
+    }
+  }
+}
+
+
+# Optimization Surface using Plotly
+p <- plot_ly(x = ~phis, y = ~thetas, z = ~z_surface) %>% 
+  add_surface() %>%
+  layout(
+    title = "Optimization Surface using the Fisher Index",
+    scene = list(
+      xaxis = list(title = "Phi "),
+      yaxis = list(title = "Theta"),
+      zaxis = list(title = "Fisher Index")
+    )
+  )
+
+p
+
+
+
+#Projected image with w1
+
+proj1 <- as.vector(Z %*% w1)
+proj1_img <- matrix(
+  proj1,
+  nrow = dim(Image)[1],
+  ncol = dim(Image)[2]
+)
+
+image(proj1_img, col = gray.colors(256),
+      main = "Projection 1 (maximum Fisher index)")
+
+#Histogram of the projection
+
+hist(proj1, breaks = 100,
+     main = "Histogram of Projection 1",
+     xlab = "Projected values")
+
+
+
+#K-means segmentation
+
+km1 <- kmeans(proj1, centers = 2, nstart = 10)
+
+seg1 <- matrix(km1$cluster,nrow = dim(Image)[1],ncol = dim(Image)[2])
+image(seg1, col = c("black", "white"), main = "Segmentation using Projection 1")
+
+
+
+
+#### SECOND PROJECTION
+
+# a vector non-collinear with w1
+v <- c(1, 0, 0)
+if (abs(sum(v * w1)) > 0.9) {
+  v <- c(0, 1, 0)
+}
+
+#Gram-Schmidt
+u1 <- v - sum(v * w1) * w1
+u1 <- u1 / sqrt(sum(u1^2))
+
+u2 <- c(
+  w1[2]*u1[3] - w1[3]*u1[2],
+  w1[3]*u1[1] - w1[1]*u1[3],
+  w1[1]*u1[2] - w1[2]*u1[1]
+)
+
+#We are now looking for the orthogonal circle
+
+angles <- seq(0,2*pi,length.out = 200)
+best_score2 <- -Inf
+for (a in angles) {
+  w <- cos(a)*u1 + sin(a)*u2
+  score <- calc_fisher(Z %*% w)
+  
+  if (score > best_score2) {
+    best_score2 <- score
+    w2 <- w
+  }
+}
+
+
+
+# Evaluate Fisher index along the orthogonal circle
+fisher_vals <- numeric(length(angles))
+cos_vals <- numeric(length(angles))
+sin_vals <- numeric(length(angles))
+
+for (i in seq_along(angles)) {
+  a <- angles[i]
+  w <- cos(a) * u1 + sin(a) * u2
+  
+  cos_vals[i] <- cos(a)
+  sin_vals[i] <- sin(a)
+  fisher_vals[i] <- calc_fisher(Z %*% w)
+}
+
+# 3D plot of the optimization curve
+
+p_circle <- plot_ly(
+  x = ~cos_vals,
+  y = ~sin_vals,
+  z = ~fisher_vals,
+  type = "scatter3d",
+  mode = "lines+markers",
+  marker = list(size = 4),
+  line = list(width = 3)
+) %>%
+  layout(
+    title = "Fisher Index on the Orthogonal Projection Circle",
+    scene = list(
+      xaxis = list(title = "cos(alpha)"),
+      yaxis = list(title = "sin(alpha)"),
+      zaxis = list(title = "Fisher Index")
+    )
+  )
+
+p_circle
+
+
+# Projected image with w2
+
+proj2 <- as.vector(Z%*% w2)
+proj2_img <- matrix(proj2, nrow=dim(Image)[1], ncol = dim(Image)[2])
+image(proj2_img, col = gray.colors(256), main = "Projection 2 (orthogonal to projection 1)")
+
+
+#Histogram of the projection
+
+hist(proj2, breaks = 100,
+     main = "Histogram of Projection 2",
+     xlab = "Projected values")
+
+
+
+#Segmentation using k-means & projection 2
+
+km2 <- kmeans(proj2, centers = 2, nstart = 10)
+seg2 <- matrix(km2$cluster, nrow = dim(Image)[1], ncol = dim(Image)[2])
+image(seg2, col = c("black", "white"), main = "Segmentation using Projection 2")
+
+
+
+
+#### THIRD PROJECTION
+
+#Third projection (orthogonal to w1 & w2)
+
+w3 <- c(
+  w1[2]*w2[3] - w1[3]*w2[2],
+  w1[3]*w2[1] - w1[1]*w2[3],
+  w1[1]*w2[2] - w1[2]*w2[1]
+)
+
+w3 <- w3 / sqrt(sum(w3^2))
+
+
+
+# Projected image with w3
+
+proj3 <- as.vector(Z %*% w3)
+proj3_img <- matrix(proj3, nrow= dim(Image)[1], ncol = dim(Image)[2])
+image(proj3_img, col = gray.colors(256), main = "Projection 3 (Orthogonal to the first two)")
+
+
+
+km3 <- kmeans(proj3, centers = 2, nstart = 10)
+
+seg3 <- matrix(km3$cluster,nrow = dim(Image)[1],ncol = dim(Image)[2]
+)
+
+image(seg3, col = c("black", "white"), main = "Segmentation using Projection 3")
+```
